@@ -194,6 +194,27 @@ header h1 span{color:var(--accent);}
   .other-entry{grid-template-columns:1fr 95px auto;}
   .bar-label{width:85px;font-size:.6rem;}
 }
+
+/* SAVE STATUS BAR */
+#save-bar{
+  position:fixed;bottom:1.2rem;right:1.2rem;z-index:9999;
+  display:flex;align-items:center;gap:.5rem;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:10px;padding:.55rem .9rem;
+  font-size:.68rem;color:var(--text2);
+  box-shadow:0 4px 20px rgba(0,0,0,0.5);
+  transition:opacity .4s,transform .4s;
+  opacity:0;transform:translateY(8px);pointer-events:none;
+}
+#save-bar.show{opacity:1;transform:translateY(0);pointer-events:auto;}
+#save-bar.saving{border-color:rgba(108,99,255,.4);color:var(--accent4);}
+#save-bar.saved {border-color:rgba(0,229,160,.4);color:var(--accent);}
+#save-bar.error {border-color:rgba(255,107,107,.4);color:var(--accent2);}
+#save-bar.loading{border-color:rgba(255,217,61,.4);color:var(--accent3);}
+.save-dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex-shrink:0;}
+.save-dot.spin{animation:spin .8s linear infinite;}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+.save-dot.spin{border-radius:50%;border:2px solid currentColor;border-top-color:transparent;background:transparent;}
 </style>
 </head>
 <body>
@@ -306,12 +327,109 @@ header h1 span{color:var(--accent);}
 </div>
 
 </div><!-- /container -->
+
+<!-- SAVE STATUS BAR -->
+<div id="save-bar">
+  <div class="save-dot" id="save-dot"></div>
+  <span id="save-msg">Salvando...</span>
+</div>
+
 <script>
 // =============================================
 // CONSTANTS
 // =============================================
 const MONTHS     = ['Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const MONTH_KEYS = ['apr','may','jun','jul','aug','sep','oct','nov','dec'];
+
+// =============================================
+// GOOGLE APPS SCRIPT — BANCO DE DADOS
+// =============================================
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbx8E-bx5hB0s7jMviji13ludmx8ac0yrUrmG6Q64jSgswwKa1JIqC-E5VrXgyFPlguJCw/exec';
+
+let saveTimer   = null;   // debounce timer
+let isSaving    = false;
+
+function showSaveBar(state, msg) {
+  const bar  = document.getElementById('save-bar');
+  const dot  = document.getElementById('save-dot');
+  const txt  = document.getElementById('save-msg');
+  bar.className = 'show ' + state;
+  dot.className = 'save-dot' + (state === 'saving' || state === 'loading' ? ' spin' : '');
+  txt.textContent = msg;
+}
+function hideSaveBar(delay = 3000) {
+  setTimeout(() => {
+    const bar = document.getElementById('save-bar');
+    bar.classList.remove('show');
+  }, delay);
+}
+
+function buildPayload() {
+  return JSON.stringify({
+    fixedDefs,
+    monthData,
+    creditEntries,
+    creditIdSeq,
+    otherIdSeq
+  });
+}
+
+function scheduleAutoSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveToGoogle, 1200); // salva 1.2s após última alteração
+}
+
+async function saveToGoogle() {
+  if (isSaving) return;
+  isSaving = true;
+  showSaveBar('saving', 'Salvando no Google...');
+  try {
+    const payload = buildPayload();
+    const url = `${APPS_SCRIPT_URL}?action=save&payload=${encodeURIComponent(payload)}`;
+    const res  = await fetch(url, { method: 'GET' });
+    const json = await res.json();
+    if (json.ok) {
+      showSaveBar('saved', '✓ Dados salvos');
+      hideSaveBar(2500);
+    } else {
+      throw new Error(json.error || 'Erro desconhecido');
+    }
+  } catch(e) {
+    showSaveBar('error', '✗ Erro ao salvar');
+    hideSaveBar(5000);
+  } finally {
+    isSaving = false;
+  }
+}
+
+async function loadFromGoogle() {
+  showSaveBar('loading', '⏳ Carregando dados...');
+  try {
+    const url  = `${APPS_SCRIPT_URL}?action=load`;
+    const res  = await fetch(url, { method: 'GET' });
+    const json = await res.json();
+    if (json.ok && json.data) {
+      const saved = JSON.parse(json.data);
+      // Restore state
+      if (saved.fixedDefs)    fixedDefs     = saved.fixedDefs;
+      if (saved.monthData)    monthData     = saved.monthData;
+      if (saved.creditEntries) creditEntries = saved.creditEntries;
+      if (saved.creditIdSeq !== undefined) creditIdSeq = saved.creditIdSeq;
+      if (saved.otherIdSeq  !== undefined) otherIdSeq  = saved.otherIdSeq;
+      showSaveBar('saved', '✓ Dados carregados');
+      hideSaveBar(2500);
+      return true;
+    } else {
+      // Sem dados salvos ainda, tudo bem
+      hideSaveBar(0);
+      return false;
+    }
+  } catch(e) {
+    showSaveBar('error', '✗ Sem conexão — modo offline');
+    hideSaveBar(5000);
+    return false;
+  }
+}
 
 // =============================================
 // STATE
@@ -387,7 +505,7 @@ function toggleIncomeEdit() {
 }
 function onIncomeType() {
   getMonth(currentMonthIdx).income = parseVal(document.getElementById('income-input').value);
-  updateBalance(); renderMonthTabs();
+  updateBalance(); renderMonthTabs(); scheduleAutoSave();
 }
 function saveIncome() {
   const v = parseVal(document.getElementById('income-input').value);
@@ -397,7 +515,7 @@ function saveIncome() {
   document.getElementById('income-display-area').style.display = '';
   document.getElementById('income-edit-btn').textContent = '✏️ editar';
   document.getElementById('income-display-val').textContent = fmt(v);
-  updateBalance(); renderMonthTabs();
+  updateBalance(); renderMonthTabs(); scheduleAutoSave();
 }
 function loadIncomeWidget() {
   const md = getMonth(currentMonthIdx);
@@ -478,19 +596,19 @@ function toggleFixed(i, chk) {
   const md = getMonth(currentMonthIdx);
   md.fixedItems[i].selected = chk.checked;
   if (md.fixedItems[i].period === 'mensal') propagateFixed(i);
-  renderFixedGrid(); recalcTotals(); renderMonthTabs();
+  renderFixedGrid(); recalcTotals(); renderMonthTabs(); scheduleAutoSave();
 }
 function updateFixedVal(i, inp) {
   const md = getMonth(currentMonthIdx);
   md.fixedItems[i].value = inp.value;
   if (md.fixedItems[i].period === 'mensal' && md.fixedItems[i].selected) propagateFixed(i);
-  recalcTotals(); renderMonthTabs();
+  recalcTotals(); renderMonthTabs(); scheduleAutoSave();
 }
 function updateFixedPeriod(i, p) {
   const md = getMonth(currentMonthIdx);
   md.fixedItems[i].period = p;
   if (p === 'mensal' && md.fixedItems[i].selected) propagateFixed(i);
-  renderFixedGrid(); recalcTotals();
+  renderFixedGrid(); recalcTotals(); scheduleAutoSave();
 }
 function propagateFixed(i) {
   const src = getMonth(currentMonthIdx).fixedItems[i];
@@ -508,7 +626,7 @@ function addCustomFixed() {
   fixedDefs.push({ name: nome });
   MONTH_KEYS.forEach((_, mi) => getMonth(mi).fixedItems.push({ selected: false, value: '', period: 'mensal' }));
   document.getElementById('outros-nome').value = '';
-  renderFixedGrid();
+  renderFixedGrid(); scheduleAutoSave();
 }
 
 // =============================================
@@ -516,15 +634,15 @@ function addCustomFixed() {
 // =============================================
 function addCreditEntry() {
   creditEntries.push({ id: creditIdSeq++, desc: '', parcValue: '', parcQty: '1', startMonthIdx: currentMonthIdx });
-  renderCreditList(); recalcTotals(); renderMonthTabs();
+  renderCreditList(); recalcTotals(); renderMonthTabs(); scheduleAutoSave();
 }
 function removeCreditEntry(id) {
   creditEntries = creditEntries.filter(c => c.id !== id);
-  renderCreditList(); recalcTotals(); renderMonthTabs();
+  renderCreditList(); recalcTotals(); renderMonthTabs(); scheduleAutoSave();
 }
 function updateCreditField(id, field, val) {
   const c = creditEntries.find(x => x.id === id);
-  if (c) { c[field] = val; renderCreditList(); recalcTotals(); renderMonthTabs(); }
+  if (c) { c[field] = val; renderCreditList(); recalcTotals(); renderMonthTabs(); scheduleAutoSave(); }
 }
 
 function renderCreditList() {
@@ -616,7 +734,7 @@ function renderCreditList() {
 // =============================================
 function addOtherEntry() {
   getMonth(currentMonthIdx).otherItems.push({ id: otherIdSeq++, desc: '', value: '', period: 'mensal' });
-  renderOtherList();
+  renderOtherList(); scheduleAutoSave();
 }
 function removeOtherEntry(id) {
   // Remove from current and future (if propagated)
@@ -624,7 +742,7 @@ function removeOtherEntry(id) {
     const md = getMonth(m);
     md.otherItems = md.otherItems.filter(o => o.id !== id && o.originId !== id);
   }
-  renderOtherList(); recalcTotals(); renderMonthTabs();
+  renderOtherList(); recalcTotals(); renderMonthTabs(); scheduleAutoSave();
 }
 function updateOtherField(id, field, val) {
   const md = getMonth(currentMonthIdx);
@@ -641,7 +759,7 @@ function updateOtherField(id, field, val) {
       if (copy) copy[field] = val;
     }
   }
-  recalcTotals(); renderMonthTabs();
+  recalcTotals(); renderMonthTabs(); scheduleAutoSave();
 }
 function propagateOther(originId) {
   const src = getMonth(currentMonthIdx).otherItems.find(x => x.id === originId);
@@ -855,11 +973,13 @@ function renderTable(period) {
 // =============================================
 // INIT
 // =============================================
-function init() {
+async function init() {
+  await loadFromGoogle();
   renderMonthTabs();
   renderFixedGrid();
-  addCreditEntry();
-  addOtherEntry();
+  // Only add blank credit/other entries if none exist
+  if (creditEntries.length === 0) addCreditEntry();
+  if (getMonth(0).otherItems.length === 0) addOtherEntry();
   recalcTotals();
 }
 init();
